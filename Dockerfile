@@ -29,7 +29,7 @@ RUN apt-get -qq update
 
 # Set build variables
 ARG PGSQL_VERSION=9.6
-ARG POSTGIS_VERSION=2.4
+ARG POSTGIS_VERSION=2.5
 
 # Install build dependencies
 USER root
@@ -61,7 +61,7 @@ RUN apt-get install -y --no-install-recommends \
       php-pear \
       php-pgsql \
       postgresql-${PGSQL_VERSION}-postgis-${POSTGIS_VERSION} \
-      postgresql-${PGSQL_VERSION}-postgis-scripts \
+      postgresql-${PGSQL_VERSION}-postgis-${POSTGIS_VERSION}-scripts \
       postgresql-contrib-${PGSQL_VERSION} \
       postgresql-server-dev-${PGSQL_VERSION} \
       python \
@@ -111,10 +111,14 @@ RUN curl -L ${PBF_URL} --create-dirs -o /srv/nominatim/src/data.osm.pbf
 
 # Filter administrative boundaries
 USER nominatim
-ARG BUILD_THREADS=16
+ARG BUILD_THREADS=8
 ARG IMPORT_ADMINISTRATIVE=false
 COPY scripts/filter_administrative.sh \
       /srv/nominatim/scripts/filter_administrative.sh
+USER root
+RUN sudo chmod +x /srv/nominatim/scripts/filter_administrative.sh && \
+      sed -i -e 's/\r$//' /srv/nominatim/scripts/filter_administrative.sh
+USER nominatim
 RUN /srv/nominatim/scripts/filter_administrative.sh
 
 # Add postgresql users
@@ -126,7 +130,7 @@ RUN service postgresql start && \
 
 # Tune postgresql configuration for import
 USER root
-ARG BUILD_MEMORY=32GB
+ARG BUILD_MEMORY=16GB
 ENV PGCONFIG_URL https://api.pgconfig.org/v1/tuning/get-config
 RUN IMPORT_CONFIG_URL="${PGCONFIG_URL}? \
       format=alter_system& \
@@ -146,19 +150,20 @@ RUN IMPORT_CONFIG_URL="${PGCONFIG_URL}? \
 
 # Initial import
 USER root
-ARG OSM2PGSQL_CACHE=24000
+ARG OSM2PGSQL_CACHE=14000
+RUN echo ${OSM2PGSQL_CACHE}
 RUN service postgresql start && \
     sudo -u nominatim ${USERHOME}/Nominatim/build/utils/setup.php \
       --osm-file /srv/nominatim/src/data.osm.pbf \
       --all \
       --threads ${BUILD_THREADS} \
-      --osm2pgsql-cache ${OSM2PGSQL_CACHE} && \
-    service postgresql stop
+      --osm2pgsql-cache ${OSM2PGSQL_CACHE}
+RUN service postgresql stop
 
 # Use safe postgresql configuration
 USER root
 ARG RUNTIME_THREADS=2
-ARG RUNTIME_MEMORY=8GB
+ARG RUNTIME_MEMORY=16GB
 RUN IMPORT_CONFIG_URL="${PGCONFIG_URL}? \
       format=alter_system& \
       pg_version=${PGSQL_VERSION}& \
@@ -168,6 +173,8 @@ RUN IMPORT_CONFIG_URL="${PGCONFIG_URL}? \
       include_pgbadger=true" && \
     IMPORT_CONFIG_URL=${IMPORT_CONFIG_URL// /} && \
     service postgresql start && \
+    sleep 20 && \
+#     tail -f /var/log/postgresql/postgresql-9.6-main.log && \
     ( curl -sSL "${IMPORT_CONFIG_URL}"; \
       echo $'ALTER SYSTEM SET fsync TO \'on\';\n'; \
       echo $'ALTER SYSTEM SET full_page_writes TO \'on\';\n'; \
@@ -193,7 +200,12 @@ ENV KILL_PROCESS_TIMEOUT=300
 ENV KILL_ALL_PROCESSES_TIMEOUT=300
 RUN mkdir -p /etc/my_init.d
 COPY scripts/start_postgresql.sh /etc/my_init.d/00-postgresql.sh
-RUN chmod +x /etc/my_init.d/00-postgresql.sh
+RUN sed -i -e 's/\r$//' /etc/my_init.d/00-postgresql.sh && \
+      chmod +x /etc/my_init.d/00-postgresql.sh
 COPY scripts/start_apache2.sh /etc/my_init.d/00-apache2.sh
-RUN chmod +x /etc/my_init.d/00-apache2.sh
+RUN sed -i -e 's/\r$//' /etc/my_init.d/00-apache2.sh && \
+      chmod +x /etc/my_init.d/00-apache2.sh
+RUN service apache2 start && \
+      journalctl && \
+      service apache2 stop
 CMD ["/sbin/my_init"]
